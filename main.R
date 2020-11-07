@@ -6,6 +6,12 @@
 #Neural Net
 library(nnet)
 library(stringr)
+#Ridge Lasso
+library(glmnet)
+library(MASS)
+#PLS
+library(pls)
+
 #Seed default
 seed = 1
 
@@ -87,7 +93,61 @@ neural.net = function(X, Y){
   inds.best = which.min(NNet.MSPEs)
   return(names.pars[inds.best])
 }
-
+ls.model = function(X.train, Y.train, X.valid, Y.valid){
+  fit.ls = lm(Y.train ~ ., data=cbind(Y.train, X.train))
+  pred.ls = predict(fit.ls, newdata = X.valid)
+  MSPE.ls = get.MSPE(Y.valid, pred.ls)
+  return(MSPE.ls)
+}
+stepwise.model = function(X.train, Y.train, X.valid, Y.valid){
+  fit.start = lm(Y.train ~ 1, data = cbind(Y.train, X.train))
+  fit.end = lm(Y.train ~ ., data = cbind(Y.train, X.train))
+  step.def = step(fit.start, list(upper = fit.end), trace=0)
+  pred.step.def = predict(step.def, X.valid)
+  err.step.def = get.MSPE(Y.valid, pred.step.def)
+  return(err.step.def)
+}
+ridge.model = function(X.train, Y.train, X.valid, Y.valid){
+  lambda.vals = seq(from = 0, to = 100, by = 0.05)
+  fit.ridge = lm.ridge(Y.train ~ ., lambda = lambda.vals, data = cbind(Y.train, X.train))
+  ind.min.GCV = which.min(fit.ridge$GCV)
+  lambda.min = lambda.vals[ind.min.GCV]
+  all.coefs.ridge = coef(fit.ridge)
+  coef.min = all.coefs.ridge[ind.min.GCV,]
+  matrix.valid.ridge = model.matrix(Y.valid ~ ., data = cbind(Y.valid, X.valid))
+  pred.ridge = matrix.valid.ridge %*% coef.min
+  MSPE.ridge = get.MSPE(Y.valid, pred.ridge)
+  return(MSPE.ridge)
+}
+lasso.model = function(X.train, Y.train, X.valid, Y.valid){
+  matrix.train.raw = model.matrix(Y.train ~ ., data = cbind(Y.train, X.train))
+  matrix.train = matrix.train.raw[,-1]
+  all.LASSOs = cv.glmnet(x = matrix.train, y = Y.train)
+  lambda.min = all.LASSOs$lambda.min
+  lambda.1se = all.LASSOs$lambda.1se
+  #Think we should apply lasso coef into neural model at some point.
+  coef.LASSO.min = predict(all.LASSOs, s = lambda.min, type = "coef")
+  coef.LASSO.1se = predict(all.LASSOs, s = lambda.1se, type = "coef")
+  included.LASSO.min = predict(all.LASSOs, s = lambda.min, type = "nonzero")
+  included.LASSO.1se = predict(all.LASSOs, s = lambda.1se, type = "nonzero")
+  matrix.valid.LASSO.raw = model.matrix(Y.valid ~ ., data = cbind(Y.valid, X.valid))
+  matrix.valid.LASSO = matrix.valid.LASSO.raw[,-1]
+  pred.LASSO.min = predict(all.LASSOs, newx = matrix.valid.LASSO, s = lambda.min, type = "response")
+  pred.LASSO.1se = predict(all.LASSOs, newx = matrix.valid.LASSO, s = lambda.1se, type = "response")
+  MSPE.LASSO.min = get.MSPE(Y.valid, pred.LASSO.min)
+  MSPE.LASSO.1se = get.MSPE(Y.valid, pred.LASSO.1se)
+  return(c(MSPE.LASSO.1se, MSPE.LASSO.min))
+}
+pls.model = function(X.train, Y.train, X.valid, Y.valid){
+  fit.pls = plsr(Y.train ~ ., data = cbind(Y.train, X.train), validation="CV", segments=10)
+  CV.pls = fit.pls$validation # All the CV information
+  PRESS.pls = CV.pls$PRESS    # Sum of squared CV residuals
+  CV.MSPE.pls = PRESS.pls / nrow(X.train)  # MSPE for internal CV
+  ind.best.pls = which.min(CV.MSPE.pls) # Optimal number of components
+  pred.pls = predict(fit.pls, X.valid, ncomp = ind.best.pls)
+  MSPE.pls = get.MSPE(Y.valid, pred.pls)
+  return(MSPE.pls)
+}
 #Load Data
 data = na.omit(read.csv("Data2020.csv"))
 test = na.omit(read.csv("Data2020testX.csv"))
@@ -101,7 +161,7 @@ folds = get.folds(n, K)
 
 #CV Comparison of Diff Models
 #As we add more models to our analysis the MSPEs for CVs will be added to all.models as a category
-all.models = c("NNET")
+all.models = c("LS", "STEPWISE", "RIDGE", "LASSO-MIN", "LASSO-1SE", "PLS", "NNET")
 all.MSPEs = array(0, dim = c(K,length(all.models)))
 colnames(all.MSPEs) = all.models
 
@@ -112,19 +172,37 @@ nn.shrink = as.integer(str_split(nn.params,',')[[1]])[2]
 
 # CV method
 for(i in 1:K){
-  print(paste0(i, " of ", K))
+  data.train = data[folds != i,]
+  data.valid = data[folds != i,]
   X.train = data[folds != i,-1]
   X.valid = data[folds == i,-1]
   X.test = test
   Y.train = data[folds != i,1]
   Y.valid = data[folds == i,1]
 
-  #Begin NeuralNet
+  #LS
+  all.MSPEs[i, "LS"] = ls.model(X.train, Y.train, X.valid, Y.valid)
+
+  #Stepwise
+  all.MSPEs[i, "STEPWISE"] = stepwise.model(X.train, Y.train, X.valid, Y.valid)
+
+  #Ridge
+  all.MSPEs[i, "RIDGE"] = ridge.model(X.train, Y.train, X.valid, Y.valid)
+
+  #Lasso
+  mspes.lasso = lasso.model(X.train, Y.train, X.valid, Y.valid)
+  all.MSPEs[i, "LASSO-1SE"] = mspes.lasso[1]
+  all.MSPEs[i, "LASSO-MIN"] = mspes.lasso[2]
+
+  #PLS
+  all.MSPEs[i, "PLS"] = pls.model(X.train, Y.train, X.valid, Y.valid)
+
+  #NeuralNet
+  set.seed(seed)
   fit.nnet = nnet(X.train, Y.train, linout=T, size=nn.hidden, decay=nn.shrink, maxit=500, trace=F)
   pred.nnet = predict(fit.nnet, X.valid)
   MSPE.nnet = get.MSPE(Y.valid, pred.nnet)
   all.MSPEs[i,"NNET"] = MSPE.nnet
-  #End of NeuralNet
 
   #Add models for analysis here.
 
