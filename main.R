@@ -33,7 +33,7 @@ rescale <- function(x1,x2){
 #Modeling Functions
 neural.net = function(X, Y){
   # Neural Net Tuning Model 1
-  # Returns predicted values
+  # Returns tuning params
 
   #Parameters
   all.n.hidden = c(1, 3, 5, 7, 9)
