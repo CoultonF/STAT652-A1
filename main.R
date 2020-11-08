@@ -11,7 +11,14 @@ library(glmnet)
 library(MASS)
 #PLS
 library(pls)
-
+#GAM
+library(mgcv)
+#Variable selection
+library(dplyr)
+library(leaps)
+#TREE
+library(rpart)
+library(rpart.plot)
 #Seed default
 seed = 1
 
@@ -35,6 +42,71 @@ rescale <- function(x1,x2){
   }
   x1
 }
+shuffle <- function(x, seed=1){
+  set.seed(seed)
+  new_order = sample.int(length(x))
+  new_x = x[new_order]
+  return(new_x)
+}
+predict.matrix = function(fit.lm, X.mat){
+  coeffs = fit.lm$coefficients
+  Y.hat = X.mat %*% coeffs
+  return(Y.hat)
+}
+
+#Variable Selection Functions
+leaps.selection = function(data){
+  data$set = ifelse(runif(n=nrow(data))>0.5, yes=2, no=1)
+  allsub1 = regsubsets(x=data[data$set==1,-1],
+                        y=data[data$set==1,1], nbest=1, nvmax=15)
+  allsub2 = regsubsets(x=data[data$set==2,-1],
+                        y=data[data$set==2,1], nbest=1,nvmax=15)
+  summ.1 = summary(allsub1)
+  summ.2 = summary(allsub2)
+  summ.1$bic
+  summ.2$bic
+  par(mfrow=c(1,2))
+  plot(allsub1, main="All Subsets on half of data data")
+  plot(allsub2, main="All Subsets on other half of data data")
+  n1 = nrow(data[data$set==1,])
+  n2 = nrow(data[data$set==2,])
+  results1 = matrix(data=NA, nrow=16, ncol=4)
+  mod0 = lm(Y ~ 1, data=data[data$set==1,])
+  pred11 = predict(mod0, newdata=data[data$set==1,])
+  sMSE = mean((pred11-data[data$set==1,]$Y)^2)
+  BIC = extractAIC(mod0, k=log(n1))
+  pred2 = predict(mod0, newdata=data[data$set==2,])
+  MSPE = mean((pred2-data[data$set==2,]$Y)^2)
+  results1[1,] = c(0, sMSE, BIC[2], MSPE)
+  colnames(results1) = c("p", "sMSE", "BIC", "MSPE")
+  data2 = data[,c(1:15)]
+  head(data)
+  for(v in 1:15){
+    mod1 = lm(Y ~ ., data=data[data$set==1, summ.1$which[v,]])
+    BIC = extractAIC(mod1, k=log(n1))
+    pred1 = predict(mod1)
+    sMSE = mean((pred1-data[data$set==1,]$Y)^2)
+    pred2 = predict(mod1, newdata=data[data$set==2,])
+    MSPE = mean((pred2-data[data$set==2,]$Y)^2)
+    results1[v+1,] = c(v, sMSE, BIC[2], MSPE)
+  }
+  round(results1, digits=2)
+  # Best size according to BIC
+  results1[which.min(results1[,3]),1]
+  # Best size according to MSPE
+  results1[which.min(results1[,4]),1]
+
+  # All 3 plots together
+  par(mfrow=c(1,3))
+  plot(x=results1[,1], y=results1[,2], xlab="Vars in model", ylab="sample-MSE",
+       main="SampleMSE vs Vars: 1st", type="b")
+  plot(x=results1[,1], y=results1[,3], xlab="Vars in model", ylab="BIC",
+       main="BIC vs Vars: 1st", type="b")
+  plot(x=results1[,1], y=results1[,4], xlab="Vars in model", ylab="MSPE",
+       main="MSPE vs Vars: 1st", type="b")
+#  return best data
+  return(data)
+}
 
 #Modeling Functions
 neural.net = function(X, Y){
@@ -43,9 +115,9 @@ neural.net = function(X, Y){
 
   #Parameters
   all.n.hidden = c(1, 3, 5, 7, 9)
-  all.shrink = c(0.001, 0.1, 0.5, 1, 2)
-  refits = 5
-  int.cv = 5 #Internal CV Fine tuning folds
+  all.shrink = c(0.001, 0.1, 0.5, 1, 2, 3)
+  refits = 10
+  int.cv = 10 #Internal CV Fine tuning folds
 
   #Variables to iterate
   all.pars = expand.grid(n.hidden = all.n.hidden, shrink = all.shrink)
@@ -139,21 +211,118 @@ lasso.model = function(X.train, Y.train, X.valid, Y.valid){
   return(c(MSPE.LASSO.1se, MSPE.LASSO.min))
 }
 pls.model = function(X.train, Y.train, X.valid, Y.valid){
-  fit.pls = plsr(Y.train ~ ., data = cbind(Y.train, X.train), validation="CV", segments=10)
-  CV.pls = fit.pls$validation # All the CV information
-  PRESS.pls = CV.pls$PRESS    # Sum of squared CV residuals
-  CV.MSPE.pls = PRESS.pls / nrow(X.train)  # MSPE for internal CV
-  ind.best.pls = which.min(CV.MSPE.pls) # Optimal number of components
+  fit.pls = plsr(Y.train ~ ., data = cbind(Y.train, X.train), validation="CV", segments=5)
+  CV.pls = fit.pls$validation
+  PRESS.pls = CV.pls$PRESS
+  CV.MSPE.pls = PRESS.pls / nrow(X.train)
+  ind.best.pls = which.min(CV.MSPE.pls)
   pred.pls = predict(fit.pls, X.valid, ncomp = ind.best.pls)
   MSPE.pls = get.MSPE(Y.valid, pred.pls)
   return(MSPE.pls)
 }
+gam.model = function(X.train, Y.train, X.valid , Y.valid){
+  fit.gam = gam(Y.train ~ s(X2) + s(X3) + s(X4) + s(X12), data = cbind(Y.train, X.train))
+  pred.gam = predict(fit.gam, X.valid)
+  MSPE.gam = get.MSPE(Y.valid, pred.gam)
+  return(MSPE.gam)
+}
+ppr.model = function(X.train, Y.train, X.valid, Y.valid){
+  #parameters
+  data.train = cbind(Y.train, X.train)
+  data.valid = cbind(Y.valid, X.valid)
+  K.ppr = 5
+  max.terms = 5
+  folds.ppr = get.folds(nrow(X.train), K.ppr)
+  MSPEs.ppr = array(0, dim = c(K.ppr,max.terms))
+  for(j in 1:K.ppr){
+    train.ppr = data.train[folds.ppr != j,]
+    valid.ppr = data.train[folds.ppr == j,]
+    Y.valid.ppr = valid.ppr$Y.train
+    for(l in 1:max.terms){
+      ### Fit model
+      fit.ppr = ppr(Y.train ~ ., data = train.ppr,
+        max.terms = max.terms, nterms = l, sm.method = "gcvspline")
+
+      pred.ppr = predict(fit.ppr, valid.ppr)
+
+      MSPE.ppr = get.MSPE(Y.valid.ppr, pred.ppr)
+      MSPEs.ppr[j,l] = MSPE.ppr
+
+    }
+  }
+  ave.MSPE.ppr = apply(t(MSPEs.ppr), 1, mean)
+  best.terms = which.min(ave.MSPE.ppr)
+  fit.ppr.best = ppr(Y.train ~ ., data = data.train, max.terms = max.terms, nterms = best.terms, sm.method = "gcvspline")
+  pred.ppr.best = predict(fit.ppr.best, data.valid)
+  MSPE.ppr.best = get.MSPE(Y.valid, pred.ppr.best)
+  return(MSPE.ppr.best)
+}
+trees.model = function(X.train, Y.train, X.valid, Y.valid){
+  fit.tree = rpart(Y.train ~ ., data = cbind(Y.train, X.train), cp = 0)
+  pred.fulltree = predict(fit.tree, newdata = cbind(Y.valid, X.valid))
+  MSPE.fulltree = get.MSPE(Y.valid, pred.fulltree)
+  full.tree.mspe = MSPE.fulltree
+  #MIN-CV TREE
+  info.tree = fit.tree$cptable
+  ind.min = which.min(info.tree[,"xerror"])
+  CP.min.raw = info.tree[ind.min, "CP"]
+  relerr.min.raw = info.tree[ind.min, "nsplit"]
+
+  if(ind.min == 1){
+    ### If minimum CP is in row 1, store this value
+    CP.min = CP.min.raw
+  } else{
+    ### If minimum CP is not in row 1, average this with the value from the
+    ### row above it.
+
+    ### Value from row above
+    CP.above = info.tree[ind.min-1, "CP"]
+
+    ### (Geometric) average
+    CP.min = sqrt(CP.min.raw * CP.above)
+  }
+  fit.tree.min = prune(fit.tree, cp = CP.min)
+  pred.fit.tree.min = predict(fit.tree.min, newdata = cbind(Y.valid, X.valid))
+  MSPE.fit.tree.min = get.MSPE(Y.valid, pred.fit.tree.min)
+  min.tree.mspe = MSPE.fit.tree.min
+
+  #1SE TREE
+  err.min = info.tree[ind.min, "xerror"]
+  se.min = info.tree[ind.min, "xstd"]
+  threshold = err.min + se.min
+  ind.1se = min(which(info.tree[1:ind.min,"xerror"] < threshold))
+  CP.1se.raw = info.tree[ind.1se, "xerror"]
+  if(ind.1se == 1){
+    ### If best CP is in row 1, store this value
+    CP.1se = CP.1se.raw
+  } else{
+    ### If best CP is not in row 1, average this with the value from the
+    ### row above it.
+
+    ### Value from row above
+    CP.above = info.tree[ind.1se-1, "CP"]
+
+    ### (Geometric) average
+    CP.1se = sqrt(CP.1se.raw * CP.above)
+  }
+
+  fit.tree.1se = prune(fit.tree, cp = CP.1se)
+  pred.fit.tree.1se = predict(fit.tree.1se, newdata = cbind(Y.valid, X.valid))
+  MSPE.fit.tree.1se = get.MSPE(Y.valid, pred.fit.tree.1se)
+  Ise.tree.mspe = MSPE.fit.tree.1se
+  return(c(full.tree.mspe,min.tree.mspe, Ise.tree.mspe))
+}
+
 #Load Data
 data = na.omit(read.csv("Data2020.csv"))
+data = data[,c(1,3,4,5,13)]
 test = na.omit(read.csv("Data2020testX.csv"))
+test = test[,c(2,3,4,12)]
 
 #Get num rows as n
 n = nrow(data)
+
+
 
 #Split into CV folds
 K=10
@@ -161,7 +330,7 @@ folds = get.folds(n, K)
 
 #CV Comparison of Diff Models
 #As we add more models to our analysis the MSPEs for CVs will be added to all.models as a category
-all.models = c("LS", "STEPWISE", "RIDGE", "LASSO-MIN", "LASSO-1SE", "PLS", "NNET")
+all.models = c("LS", "STEPWISE", "RIDGE", "LASSO-MIN", "LASSO-1SE", "PLS", "GAM", "PPR", "NNET", "FULL TREE", "MIN TREE", "1SE TREE")
 all.MSPEs = array(0, dim = c(K,length(all.models)))
 colnames(all.MSPEs) = all.models
 
@@ -172,13 +341,11 @@ nn.shrink = as.integer(str_split(nn.params,',')[[1]])[2]
 
 # CV method
 for(i in 1:K){
-  data.train = data[folds != i,]
-  data.valid = data[folds != i,]
   X.train = data[folds != i,-1]
   X.valid = data[folds == i,-1]
-  X.test = test
   Y.train = data[folds != i,1]
   Y.valid = data[folds == i,1]
+  X.test = test
 
   #LS
   all.MSPEs[i, "LS"] = ls.model(X.train, Y.train, X.valid, Y.valid)
@@ -194,8 +361,14 @@ for(i in 1:K){
   all.MSPEs[i, "LASSO-1SE"] = mspes.lasso[1]
   all.MSPEs[i, "LASSO-MIN"] = mspes.lasso[2]
 
+  #GAM
+  all.MSPEs[i, "GAM"] = gam.model(X.train, Y.train, X.valid, Y.valid)
+
   #PLS
   all.MSPEs[i, "PLS"] = pls.model(X.train, Y.train, X.valid, Y.valid)
+
+  #PPR
+  all.MSPEs[i, "PPR"] = ppr.model(X.train, Y.train, X.valid, Y.valid)
 
   #NeuralNet
   set.seed(seed)
@@ -204,7 +377,14 @@ for(i in 1:K){
   MSPE.nnet = get.MSPE(Y.valid, pred.nnet)
   all.MSPEs[i,"NNET"] = MSPE.nnet
 
+  #TREES
+  trees.mspes = trees.model(X.train, Y.train, X.valid, Y.valid)
+  all.MSPEs[i,"FULL TREE"] = trees.mspes[1]
+  all.MSPEs[i,"MIN TREE"] = trees.mspes[2]
+  all.MSPEs[i,"1SE TREE"] = trees.mspes[3]
+
   #Add models for analysis here.
 
 }
+par(mfrow=c(1,1))
 boxplot(all.MSPEs, main = paste0("CV MSPEs over ", K, " folds"))
