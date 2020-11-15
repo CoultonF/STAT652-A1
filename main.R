@@ -1,5 +1,5 @@
-# Title     : TODO
-# Objective : TODO
+# Title     : STAT652-A1
+# Objective : Minimize R2
 # Created by: coultonf
 # Created on: 2020-11-06
 #Libraries for...
@@ -11,16 +11,15 @@ library(glmnet)
 library(MASS)
 #PLS
 library(pls)
-#GAM
-library(mgcv)
 #Variable selection
 library(dplyr)
 library(leaps)
 #TREE
 library(rpart)
 library(rpart.plot)
+
 #Seed default
-seed = 1
+seed = 10
 
 #Helper functions
 get.folds = function(n, K) {
@@ -56,26 +55,17 @@ predict.matrix = function(fit.lm, X.mat){
 
 #Variable Selection Functions
 leaps.selection = function(data){
-  data$set = ifelse(runif(n=nrow(data))>0.5, yes=2, no=1)
-  allsub1 = regsubsets(x=data[data$set==1,-1],
-                        y=data[data$set==1,1], nbest=1, nvmax=15)
-  allsub2 = regsubsets(x=data[data$set==2,-1],
-                        y=data[data$set==2,1], nbest=1,nvmax=15)
-  summ.1 = summary(allsub1)
-  summ.2 = summary(allsub2)
+  allsub = regsubsets(x=data[,-1], y=data[,1], nbest=1,nvmax=15)
+  summ.1 = summary(allsub)
   summ.1$bic
-  summ.2$bic
-  par(mfrow=c(1,2))
+  par(mfrow=c(1,1))
   plot(allsub1, main="All Subsets on half of data data")
-  plot(allsub2, main="All Subsets on other half of data data")
-  n1 = nrow(data[data$set==1,])
-  n2 = nrow(data[data$set==2,])
+  n1 = nrow(data)
   results1 = matrix(data=NA, nrow=16, ncol=4)
-  mod0 = lm(Y ~ 1, data=data[data$set==1,])
-  pred11 = predict(mod0, newdata=data[data$set==1,])
-  sMSE = mean((pred11-data[data$set==1,]$Y)^2)
+  mod0 = lm(Y ~ 1, data=data)
+  pred11 = predict(mod0, newdata=data)
+  sMSE = mean((pred11-data$Y)^2)
   BIC = extractAIC(mod0, k=log(n1))
-  pred2 = predict(mod0, newdata=data[data$set==2,])
   MSPE = mean((pred2-data[data$set==2,]$Y)^2)
   results1[1,] = c(0, sMSE, BIC[2], MSPE)
   colnames(results1) = c("p", "sMSE", "BIC", "MSPE")
@@ -114,7 +104,7 @@ neural.net = function(X, Y){
   # Returns tuning params
 
   #Parameters
-  all.n.hidden = c(1, 3, 5, 7, 9)
+  all.n.hidden = c(1, 3, 5, 7)
   all.shrink = c(0.001, 0.1, 0.5, 1, 2, 3)
   refits = 10
   int.cv = 10 #Internal CV Fine tuning folds
@@ -221,10 +211,12 @@ pls.model = function(X.train, Y.train, X.valid, Y.valid){
   return(MSPE.pls)
 }
 gam.model = function(X.train, Y.train, X.valid , Y.valid){
-  fit.gam = gam(Y.train ~ s(X2) + s(X3) + s(X4) + s(X12), data = cbind(Y.train, X.train))
-  pred.gam = predict(fit.gam, X.valid)
+  fit.gam = gam(data=cbind(Y.train, X.train),
+            formula=Y.train ~ s(X2, sp=0.1) + s(X4,sp=0.2) + s(X12, sp=0.2) + s(X15, sp=0.2),
+            family=gaussian(link=identity))
+  pred.gam = predict(fit.gam ,newdata=X.valid)
   MSPE.gam = get.MSPE(Y.valid, pred.gam)
-  return(MSPE.gam)
+  return(list(MSPE.gam, pred.gam))
 }
 ppr.model = function(X.train, Y.train, X.valid, Y.valid){
   #parameters
@@ -258,7 +250,7 @@ ppr.model = function(X.train, Y.train, X.valid, Y.valid){
   return(MSPE.ppr.best)
 }
 trees.model = function(X.train, Y.train, X.valid, Y.valid){
-  fit.tree = rpart(Y.train ~ ., data = cbind(Y.train, X.train), cp = 0)
+  fit.tree = rpart(Y.train ~ X2 + X4 + X12 + X15, data = cbind(Y.train, X.train), cp = 0.05)
   pred.fulltree = predict(fit.tree, newdata = cbind(Y.valid, X.valid))
   MSPE.fulltree = get.MSPE(Y.valid, pred.fulltree)
   full.tree.mspe = MSPE.fulltree
@@ -315,29 +307,26 @@ trees.model = function(X.train, Y.train, X.valid, Y.valid){
 
 #Load Data
 data = na.omit(read.csv("Data2020.csv"))
-data = data[,c(1,3,4,5,13)]
+#data = data[,c(1,3,4,5,13)]
 test = na.omit(read.csv("Data2020testX.csv"))
-test = test[,c(2,3,4,12)]
+#test = test[,c(2,4,6,12)]
 
 #Get num rows as n
 n = nrow(data)
-
-
 
 #Split into CV folds
 K=10
 folds = get.folds(n, K)
 
 #CV Comparison of Diff Models
-#As we add more models to our analysis the MSPEs for CVs will be added to all.models as a category
-all.models = c("LS", "STEPWISE", "RIDGE", "LASSO-MIN", "LASSO-1SE", "PLS", "GAM", "PPR", "NNET", "FULL TREE", "MIN TREE", "1SE TREE")
+all.models = c("LS", "STEPWISE", "RIDGE", "LASSO-MIN", "LASSO-1SE", "PLS", "GAM", "PPR", "FULL TREE", "MIN TREE", "1SE TREE")
 all.MSPEs = array(0, dim = c(K,length(all.models)))
 colnames(all.MSPEs) = all.models
 
 #Get NeuralNet Fine Tuned Params
-nn.params = neural.net(data[-1],data[1])
-nn.hidden = as.integer(str_split(nn.params,',')[[1]])[1]
-nn.shrink = as.integer(str_split(nn.params,',')[[1]])[2]
+#nn.params = neural.net(data[-1],data[1])
+#nn.hidden = as.integer(str_split(nn.params,',')[[1]])[1]
+#nn.shrink = as.integer(str_split(nn.params,',')[[1]])[2]
 
 # CV method
 for(i in 1:K){
@@ -362,7 +351,7 @@ for(i in 1:K){
   all.MSPEs[i, "LASSO-MIN"] = mspes.lasso[2]
 
   #GAM
-  all.MSPEs[i, "GAM"] = gam.model(X.train, Y.train, X.valid, Y.valid)
+  all.MSPEs[i, "GAM"] = gam.model(X.train, Y.train, X.valid, Y.valid)[[1]]
 
   #PLS
   all.MSPEs[i, "PLS"] = pls.model(X.train, Y.train, X.valid, Y.valid)
@@ -370,12 +359,12 @@ for(i in 1:K){
   #PPR
   all.MSPEs[i, "PPR"] = ppr.model(X.train, Y.train, X.valid, Y.valid)
 
-  #NeuralNet
-  set.seed(seed)
-  fit.nnet = nnet(X.train, Y.train, linout=T, size=nn.hidden, decay=nn.shrink, maxit=500, trace=F)
-  pred.nnet = predict(fit.nnet, X.valid)
-  MSPE.nnet = get.MSPE(Y.valid, pred.nnet)
-  all.MSPEs[i,"NNET"] = MSPE.nnet
+  #NNET
+  #set.seed(seed)
+  #fit.nnet = nnet(X.train, Y.train, linout=T, size=nn.hidden, decay=nn.shrink, maxit=500, trace=F)
+  #pred.nnet = predict(fit.nnet, X.valid)
+  #MSPE.nnet = get.MSPE(Y.valid, pred.nnet)
+  #all.MSPEs[i,"NNET"] = MSPE.nnet
 
   #TREES
   trees.mspes = trees.model(X.train, Y.train, X.valid, Y.valid)
@@ -383,8 +372,19 @@ for(i in 1:K){
   all.MSPEs[i,"MIN TREE"] = trees.mspes[2]
   all.MSPEs[i,"1SE TREE"] = trees.mspes[3]
 
-  #Add models for analysis here.
-
 }
 par(mfrow=c(1,1))
 boxplot(all.MSPEs, main = paste0("CV MSPEs over ", K, " folds"))
+all.RMSPEs = apply(all.MSPEs, 2, function(W) W/min(W))
+boxplot(t(all.RMSPEs))
+#Testing R2 on self
+rsq <- function(x, y) summary(lm(y~x))$r.squared
+
+Y.hat = gam.model(data[,-1], data[,1], test, test[,1])[[2]]
+Y = gam.model(data[,-1], data[,1], data[,-1], data[1])[[2]]
+summary(Y)
+summary(data[,1])
+summary(Y.hat)
+rsq(data[,1], Y)
+
+write.table(Y.hat, 'output.csv', sep = ",", row.names = F, col.names = F)
