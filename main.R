@@ -375,8 +375,7 @@ for(i in 1:K){
 }
 par(mfrow=c(1,1))
 boxplot(all.MSPEs, main = paste0("CV MSPEs over ", K, " folds"))
-all.RMSPEs = apply(all.MSPEs, 2, function(W) W/min(W))
-boxplot(t(all.RMSPEs))
+
 #Testing R2 on self
 rsq <- function(x, y) summary(lm(y~x))$r.squared
 
